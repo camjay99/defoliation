@@ -1,7 +1,29 @@
 ##############################################################
-# Initialize Google Earth Engine API
+# Parse arguments
 ##############################################################
 
+import argparse
+
+parser = argparse.ArgumentParser(
+    description='Options for calculating defoliation')
+
+# The script will ONLY submit the run when -s or --submit is included.
+parser.add_argument('--submit', '-s', action='store_true')
+
+# The first year to look for defoliation signals in.
+parser.add_argument('--start', '-S', action='store', default=2019)
+
+# The last year to look for defoliation signals in (inclusive).
+parser.add_argument('--end', '-E', action='store', default=2023)
+
+# The geomtry to calculate defoliation within. A list of valid geometries are available in scripts/geometries.py
+parser.add_argument('--geometry', '-g', action = 'store', default = 'Mt_Pleasant')
+
+# The geomtry to calculate defoliation within. A list of valid geometries are available in scripts/geometries.py
+parser.add_argument('--crs', '-c', action = 'store', default = 'epsg:4326')
+
+# Parse arguments provided to script
+args = parser.parse_args()
 
 ##############################################################
 # Initialize Google Earth Engine API
@@ -163,6 +185,9 @@ models = ee.Image("projects/ee-cjc378/assets/Adirondacks_Trends/Landsat_unscaled
 # Prepare Landsat 7 and 8
 ##################################################################
 
+start_date = ee.Date.fromYMD(args.start, 1, 1)
+end_date = ee.Date.fromYMD(args.end + 1, 1, 1)
+
 def applyScaleFactors(image):
     # Bits 4 and 3 are cloud shadow and cloud, respectively.
     cloudShadowBitMask = 1 << 4
@@ -180,11 +205,11 @@ def applyScaleFactors(image):
 
 l7 = (ee.ImageCollection("LANDSAT/LE07/C02/T1_L2")
         .filterBounds(region)
-        .filterDate(START_DATE, END_DATE)
+        .filterDate(start_date, end_date)
         .map(applyScaleFactors))
 l8 = (ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
         .filterBounds(region)
-        .filterDate(START_DATE, END_DATE)
+        .filterDate(start_date, end_date)
         .map(applyScaleFactors))
 
 
@@ -241,11 +266,6 @@ def preprocess(image):
 
 ls = ls.map(preprocess)
 
-# Mask out points with a mean growing season EVI below 0.3,
-# as these are likely to be landcovers other than forest
-#mean_mask = ls.select('EVI').mean().gt(0.3);
-#ls = ls.map(lambda image: image.updateMask(mean_mask).copyProperties(image, ['system:time_start']))
-
 ######################################
 # Estimate defoliation in given window
 ######################################
@@ -293,17 +313,18 @@ def calc_statistics(images):
 # Submit batch job
 #################################
 
-for year in range(START_YEAR, END_YEAR+1):
-    defol = calc_statistics(ls.filterDate(ee.Date.fromYMD(year, 1, 1), ee.Date.fromYMD(year+1, 1, 1))).set('system:index', str(year))
+if args.submit:
+    for year in range(args.start, args.end+1):
+        defol = calc_statistics(ls.filterDate(ee.Date.fromYMD(year, 1, 1), ee.Date.fromYMD(year+1, 1, 1))).set('system:index', str(year))
 
-    task = ee.batch.Export.image.toAsset(
-        image            = defol,
-        description      = f'{description}_{year}',
-        assetId          = f'projects/ee-cjc378/assets/{assetID}_{year}',
-        region           = region, 
-        scale            = 30,
-        crs              = "EPSG:4326",
-        pyramidingPolicy = {'.default': 'mean'},
-        maxPixels        = 1e10
-    )
-    task.start()
+        task = ee.batch.Export.image.toAsset(
+            image            = defol,
+            description      = f'{description}_{year}',
+            assetId          = f'projects/ee-cjc378/assets/{assetID}_{year}',
+            region           = region, 
+            scale            = 30,
+            crs              = args.crs,
+            pyramidingPolicy = {'.default': 'mean'},
+            maxPixels        = 1e10
+        )
+        task.start()
