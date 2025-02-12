@@ -46,7 +46,7 @@ except:
 # Specify base names and load previous results
 ##################################################################
 
-description = f'MODIS_unscaled_{args.geometry}_Phenology'
+description = f'MODIS_unscaled_{args.geometry}_Trends'
 assetID = f'projects/{args.project}/assets/{args.geometry}_Trends/MODIS_unscaled'
 
 phenology = ee.Image(f'projects/{args.project}/assets/{args.geometry}_Phenology_Maps/MODIS')

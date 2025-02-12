@@ -39,3 +39,6 @@ def get_geometry(site_name):
                   [-76.68476578221755, 42.25466417545956],
                   [-76.60614487157302, 42.25466417545956],
                   [-76.60614487157302, 42.29975344583736]]], None, False)
+
+def get_state(state):
+    return ee.FeatureCollection("FAO/GAUL_SIMPLIFIED_500m/2015/level1").filter(ee.Filter.eq('ADM1_NAME', state)).geometry()

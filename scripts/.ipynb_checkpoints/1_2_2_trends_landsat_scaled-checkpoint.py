@@ -46,7 +46,7 @@ except:
 # Specify base names and load previous results
 ##################################################################
 
-description = f'Landsat_{args.geometry}_Phenology'
+description = f'Landsat_{args.geometry}_Trends'
 assetID = f'projects/{args.project}/assets/{args.geometry}_Trends/Landsat'
 
 phenology = ee.Image(f'projects/{args.project}/assets/{args.geometry}_Phenology_Maps/Landsat')
