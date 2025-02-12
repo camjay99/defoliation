@@ -85,7 +85,6 @@ l8 = (ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
         .filterDate(start_date, end_date)
         .map(applyScaleFactors))
 
-
 ##################################################################
 # Harmonize Landsat 7 and 8
 ##################################################################
@@ -102,7 +101,6 @@ l8 = l8.map(harmonizeL8)
 
 # Combined collection
 ls = l7.merge(l8)
-
     
 ##################################################################
 # Mask nonforest/off-season and compute NDVI and DOY for each image
@@ -158,7 +156,6 @@ def calc_statistics(images):
     mean_intensity = images.select("EVI_anom").filter(ee.Filter.dayOfYear(161, 208)).mean().rename("mean_intensity")
     
     return mean_intensity.set('method', 'Landsat_unscaled').set('year', year)
-
 
 #################################
 # Submit batch job

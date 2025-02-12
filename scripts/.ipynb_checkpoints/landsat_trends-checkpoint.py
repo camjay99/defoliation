@@ -6,7 +6,7 @@ import argparse
 import geometries
 
 parser = argparse.ArgumentParser(
-    description='Options for calculating defoliation')
+    description='Options for calculating seasonal trends')
 
 # The script will ONLY submit the run when -s or --submit is included.
 parser.add_argument('--submit', '-s', action='store_true')
@@ -41,16 +41,15 @@ except:
     # need to authenticate with your credential at the first time
     ee.Authenticate()
     ee.Initialize(project=args.project)
-    
+
 ##################################################################
-# Specify base names and load previous results
+# Specify download region and cloud removal parameters
 ##################################################################
 
-description = f'Landsat_unscaled_{args.geometry}_Defoliation'
-assetID = f'projects/{args.project}/assets/{args.geometry}_Defoliation/Landsat_unscaled'
+description = f'Landsat_{args.geometry}_Phenology'
+assetID = f'projects/{args.project}/assets/{args.geometry}_Trends/Landsat'
 
 phenology = ee.Image(f'projects/{args.project}/assets/{args.geometry}_Phenology_Maps/Landsat')
-models = ee.Image(f'projects/{args.project}/assets/{args.geometry}_Trends/Landsat_unscaled')
 
 geometry = geometries.get_geometry(args.geometry)
 
@@ -85,6 +84,7 @@ l8 = (ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
         .filterDate(start_date, end_date)
         .map(applyScaleFactors))
 
+
 ##################################################################
 # Harmonize Landsat 7 and 8
 ##################################################################
@@ -101,7 +101,7 @@ l8 = l8.map(harmonizeL8)
 
 # Combined collection
 ls = l7.merge(l8)
-    
+
 ##################################################################
 # Mask nonforest/off-season and compute NDVI and DOY for each image
 ##################################################################
@@ -133,46 +133,47 @@ def preprocess(image):
     return (image.addBands(ee.Image([EVI, doy_band]))
                  #.updateMask(forest_mask)
                  .updateMask(pheno_mask)
-                 .updateMask(EVI_mask).copyProperties(image, ['system:time_start']))
+                 .updateMask(EVI_mask)
+                 .copyProperties(image, ['system:time_start']))
 
 ls = ls.map(preprocess)
 
-######################################
-# Estimate defoliation in given window
-######################################
+#################################
+# Rescale within each year
+#################################       
 
-# Calculate anomaly
-def calc_anom(image):
-    slope = models.select('slope')
-    offset = models.select('offset')
-    doy = image.select('doy')
-    predict = slope.multiply(doy).add(offset)
-    anom = image.select('EVI').subtract(predict)
-    
-    return image.addBands(anom.rename('EVI_anom'))
+def rescale(year):
+    year = ee.Number(year)
+    start = ee.Date.fromYMD(year,1,1)
+    end   = ee.Date.fromYMD(year.add(1),1,1)
+    year_max = ls.select('EVI').filterDate(start, end).max()
+    return (ls.filterDate(start, end)
+              .map(lambda image: 
+                       image.addBands(
+                           image.select('EVI').divide(year_max).rename('EVI_scaled')).copyProperties(image, ['system:time_start'])))
 
-def calc_statistics(images): 
-    images = images.map(calc_anom)
-    mean_intensity = images.select("EVI_anom").filter(ee.Filter.dayOfYear(161, 208)).mean().rename("mean_intensity")
-    
-    return mean_intensity.set('method', 'Landsat_unscaled').set('year', year)
+years = ee.List.sequence(args.start, args.end)
+ls_scaled = ee.ImageCollection(ee.FeatureCollection(years.map(rescale)).flatten())
+
+#################################
+# Theil-Sen model fitting
+#################################
+
+ss = ls_scaled.select(['doy', 'EVI_scaled']).reduce(ee.Reducer.sensSlope())
 
 #################################
 # Submit batch job
 #################################
 
 if args.submit:
-    for year in range(args.start, args.end+1):
-        defol = calc_statistics(ls.filterDate(ee.Date.fromYMD(year, 1, 1), ee.Date.fromYMD(year+1, 1, 1))).set('system:index', str(year))
-
-        task = ee.batch.Export.image.toAsset(
-            image            = defol,
-            description      = f'{description}_{year}',
-            assetId          = f'{asset_ID}_{year}',
-            region           = geometry, 
-            scale            = 30,
-            crs              = args.crs,
-            pyramidingPolicy = {'.default': 'mean'},
-            maxPixels        = 1e10
-        )
-        task.start()
+    task = ee.batch.Export.image.toAsset(
+        image            = ss,
+        description      = description,
+        assetId          = assetID,
+        region           = geometry, 
+        scale            = 30,
+        crs              = args.crs,
+        pyramidingPolicy = {'.default': 'mean'},
+        maxPixels        = 1e10
+    )
+    task.start()
