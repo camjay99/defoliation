@@ -42,136 +42,100 @@ except:
     ee.Authenticate()
     ee.Initialize(project=args.project)
 
+
 ##################################################################
-# Specify download region and cloud removal parameters
+# Specify base names and load previous results
 ##################################################################
 
-description = f'Landsat_{args.geometry}_Phenology'
-assetID = f'projects/{args.project}/assets/{args.geometry}_Trends/Landsat'
+description = f'MODIS_{args.geometry}_Phenology'
+assetID = f'projects/{args.project}/assets/{args.geometry}_Trends/MODIS'
 
-phenology = ee.Image(f'projects/{args.project}/assets/{args.geometry}_Phenology_Maps/Landsat')
+phenology = ee.Image(f'projects/{args.project}/assets/{args.geometry}_Phenology_Maps/MODIS')
 
 geometry = geometries.get_geometry(args.geometry)
 
 ##################################################################
-# Prepare Landsat 7 and 8
+# Prepare MODIS EVI
 ##################################################################
 
 start_date = ee.Date.fromYMD(args.start, 1, 1)
 end_date = ee.Date.fromYMD(args.end + 1, 1, 1)
 
-def applyScaleFactors(image):
-    # Bits 4 and 3 are cloud shadow and cloud, respectively.
-    cloudShadowBitMask = 1 << 4
-    cloudsBitMask = 1 << 3
-    # Get the pixel QA band.
-    qa = image.select('QA_PIXEL')
-    # Both flags should be set to zero, indicating clear conditions.
-    mask = (qa.bitwiseAnd(cloudShadowBitMask).eq(0)
-             .And(qa.bitwiseAnd(cloudsBitMask).eq(0)))
-        
-    
-    opticalBands = image.select('SR_B.').multiply(0.0000275).add(-0.2)
-    return (image.addBands(opticalBands, None, True) 
-                 .updateMask(mask).copyProperties(image, ['system:time_start']))
+# Load IGBP MODIS land cover classifications
+landcover = (ee.ImageCollection("MODIS/061/MCD12Q1")
+                    .select('LC_Type1')
+                    .filter(ee.Filter.eq('system:index', '2016_01_01'))
+                    .first())
 
-l7 = (ee.ImageCollection("LANDSAT/LE07/C02/T1_L2")
-        .filterBounds(geometry)
-        .filterDate(start_date, end_date)
-        .map(applyScaleFactors))
-l8 = (ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
-        .filterBounds(geometry)
-        .filterDate(start_date, end_date)
-        .map(applyScaleFactors))
+def prepareTimeSeries(image):
+    withObs = image.select('num_observations_1km').gt(0)
+    QA = image.select('state_1km')
+    snowMask = QA.bitwiseAnd(1 << 15).eq(0).rename('snowMask')
+    shadowMask = QA.bitwiseAnd(1 << 2).eq(0)
+    cloudMask = QA.bitwiseAnd(1 << 10).eq(0)
+    cirrusMask1 = QA.bitwiseAnd(1 << 8).eq(0)
+    cirrusMask2 = QA.bitwiseAnd(1 << 9).eq(0)
+    mask = cirrusMask1.And(cirrusMask2).And(cloudMask).And(shadowMask).And(snowMask)
 
-
-##################################################################
-# Harmonize Landsat 7 and 8
-##################################################################
-
-def harmonizeL7(image):
-    return image.select(['SR_B1', 'SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B7'],['BLUE', 'GREEN', 'RED', 'NIR', 'SWIR1', 'SWIR2']).copyProperties(image, ['system:time_start'])
-
-def harmonizeL8(image):
-    return image.select(['SR_B2','SR_B3','SR_B4','SR_B5','SR_B6','SR_B7'],['BLUE', 'GREEN', 'RED', 'NIR', 'SWIR1', 'SWIR2'])
-
-# Map harmonizations and create combined collection
-l7 = l7.map(harmonizeL7)
-l8 = l8.map(harmonizeL8)
-
-# Combined collection
-ls = l7.merge(l8)
-
-##################################################################
-# Mask nonforest/off-season and compute NDVI and DOY for each image
-##################################################################
-
-# Load NLCD 2019 landcover map
-nlcd_landcover = ee.ImageCollection('USGS/NLCD_RELEASES/2019_REL/NLCD') \
-    .filter(ee.Filter.eq('system:index', '2019')).first().select('landcover')
-
-# Calculate EVI for the scene
-def preprocess(image):
-    # New bands
     EVI = image.expression(
         '2.5 * ((NIR - RED) / (NIR + 6 * RED + 7.5 * BLUE + 1))',
         {
-            'NIR': image.select('NIR'),
-            'RED': image.select('RED'),
-            'BLUE': image.select('BLUE')
-        }).rename('EVI')
-    
+            'NIR': image.select('sur_refl_b02').divide(10000),
+            'RED': image.select('sur_refl_b01').divide(10000),
+            'BLUE': image.select('sur_refl_b03').divide(10000)
+        }).rename('EVI');
     doy = image.date().getRelative('day', 'year')
     doy_band = ee.Image.constant(doy).uint16().rename('doy')
     
-    # Masks
-    forest_mask = nlcd_landcover.gte(41).And(nlcd_landcover.lte(71))
+    forest_mask = landcover.gte(1).And(landcover.lte(5))
     pheno_mask = doy_band.gte(phenology.select('SoS')).And(doy_band.lte(phenology.select('EoS')))
     EVI_mask = EVI.lte(1).And(EVI.gte(0))
-    
-    # Return the masked image with EVI bands.
-    return (image.addBands(ee.Image([EVI, doy_band]))
-                 #.updateMask(forest_mask)
-                 .updateMask(pheno_mask)
-                 .updateMask(EVI_mask)
-                 .copyProperties(image, ['system:time_start']))
+    mask = mask.And(forest_mask).And(pheno_mask).And(EVI_mask)
 
-ls = ls.map(preprocess)
+    return (image.addBands(ee.Image([EVI, doy_band]))
+                 .addBands(image.metadata('system:time_start','date1'))
+                 .updateMask(withObs)
+                 .updateMask(mask)
+                 .copyProperties(image))
+
+TOC = (ee.ImageCollection('MODIS/061/MOD09GQ')
+        .linkCollection(ee.ImageCollection("MODIS/061/MOD09GA"), ["num_observations_1km", "state_1km", "sur_refl_b03"])
+        .filterDate(start_date, end_date)
+        .map(prepareTimeSeries))
 
 #################################
 # Rescale within each year
-#################################       
+#################################      
 
 def rescale(year):
     year = ee.Number(year)
     start = ee.Date.fromYMD(year,1,1)
     end   = ee.Date.fromYMD(year.add(1),1,1)
-    year_max = ls.select('EVI').filterDate(start, end).max()
-    return (ls.filterDate(start, end)
+    year_max = TOC.select('EVI').filterDate(start, end).max()
+    return (TOC.filterDate(start, end)
               .map(lambda image: 
                        image.addBands(
                            image.select('EVI').divide(year_max).rename('EVI_scaled')).copyProperties(image, ['system:time_start'])))
 
 years = ee.List.sequence(args.start, args.end)
-ls_scaled = ee.ImageCollection(ee.FeatureCollection(years.map(rescale)).flatten())
+TOC_scaled = ee.ImageCollection(ee.FeatureCollection(years.map(rescale)).flatten())
 
 #################################
 # Theil-Sen model fitting
 #################################
 
-ss = ls_scaled.select(['doy', 'EVI_scaled']).reduce(ee.Reducer.sensSlope())
+ss = TOC_scaled.select(['doy', 'EVI_scaled']).reduce(ee.Reducer.sensSlope())
 
 #################################
 # Submit batch job
 #################################
-
 if args.submit:
     task = ee.batch.Export.image.toAsset(
         image            = ss,
         description      = description,
         assetId          = assetID,
         region           = geometry, 
-        scale            = 30,
+        scale            = 250,
         crs              = args.crs,
         pyramidingPolicy = {'.default': 'mean'},
         maxPixels        = 1e10
