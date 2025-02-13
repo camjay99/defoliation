@@ -23,7 +23,7 @@ parser.add_argument('--end', '-E', action='store', default=2023)
 # The geomtry to calculate defoliation within. A list of valid geometries are available in scripts/geometries.py
 parser.add_argument('--geometry', '-g', action='store', default='Mt_Pleasant', choices=geometries.site_names)
 
-# The geomtry to calculate defoliation within. A list of valid geometries are available in scripts/geometries.py
+# The CRS to output the resulting layers in.
 parser.add_argument('--crs', '-c', action='store', default='epsg:4326')
 
 # Parse arguments provided to script

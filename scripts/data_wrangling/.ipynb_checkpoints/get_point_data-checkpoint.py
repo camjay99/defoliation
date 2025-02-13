@@ -1,3 +1,6 @@
+# Collect all the observations for a specified lat/lon point and save them to drive
+# This data is used to create Fig. 1
+    
 ##############################################################
 # Imports Packages
 ##############################################################

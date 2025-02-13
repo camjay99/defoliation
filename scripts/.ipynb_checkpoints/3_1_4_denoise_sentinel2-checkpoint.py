@@ -20,7 +20,7 @@ parser.add_argument('--year', '-S', action='store', default=2019)
 # State to calculate defoliation over.
 parser.add_argument('--state', '-t', action='store', default='New York')
 
-# The geomtry to calculate defoliation within. A list of valid geometries are available in scripts/geometries.py
+# The CRS to output the resulting layers in.
 parser.add_argument('--crs', '-c', action='store', default='epsg:4326')
 
 # Parse arguments provided to script
