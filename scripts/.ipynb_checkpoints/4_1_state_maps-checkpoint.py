@@ -75,7 +75,7 @@ for year in range(args.start, args.end+1):
     
 
     # Make sure mosaic has correct projection. In the future, update process to only use projected systems and to properly apply pyramiding to avoid having to do this.
-    defol = defol.clip(geometry).reproject(crs=args.crs, scale=1000).reduceResolution(reducer=ee.Reducer.mean(), maxPixels=15000)
+    defol = defol.clip(geometry).reproject(crs=args.crs, scale=args.scale).reduceResolution(reducer=ee.Reducer.mean(), maxPixels=15000)
 
     if args.submit:
         task_upscaled_intensity = ee.batch.Export.image.toDrive(

@@ -4,6 +4,7 @@
 
 import argparse
 import geometries
+import time
 
 parser = argparse.ArgumentParser(
     description='Options for calculating seasonal trends')
@@ -15,13 +16,13 @@ parser.add_argument('--submit', '-s', action='store_true')
 parser.add_argument('--project', '-p', action='store', default=None, required=True)
 
 # The year to look for defoliation signals in.
-parser.add_argument('--year', '-S', action='store', default=2019)
+parser.add_argument('--year', '-S', action='store',  type=int, default=2019)
 
 # State to calculate defoliation over.
 parser.add_argument('--state', '-t', action='store', default='New York')
 
 # The CRS to output the resulting layers in.
-parser.add_argument('--crs', '-c', action='store', default='epsg:4326')
+parser.add_argument('--crs', '-c', action='store', default='epsg:5070')
 
 # Parse arguments provided to script
 args = parser.parse_args()
@@ -47,14 +48,18 @@ description = f'Sentinel2_unscaled_{args.state.replace(" ", "_")}_Denoised'
 assetID = f'projects/{args.project}/assets/score_denoised_{args.state.replace(" ", "_")}/score_denoised_{args.year}'
 defol_coll = ee.ImageCollection(f'projects/{args.project}/assets/defoliation_score_{args.state.replace(" ", "_")}').filter(ee.Filter.eq('year', args.year))
 geometry = geometries.get_state(args.state)
-    
-start_date = ee.Date.fromYMD(args.year, 1, 1)
-end_date = ee.Date.fromYMD(args.year+1, 1, 1)
+
+# Assemble mask
+qa_masks = ee.ImageCollection('projects/ee-cjc378/assets/qa_masks_New_York')
+year_masks = {2019:1056, 2020:2144, 2021:4320, 2022:8672, 2023:17376}
+mask_value = ee.Number(2).pow(15).add(ee.Number(year_masks[args.year])).toUint16()
+qa = qa_masks.mosaic()
+qa_mask = qa.bitwiseAnd(mask_value).eq(mask_value)
 
 #Specify grid size in projection, x and y units (based on projection).
 projection = 'EPSG:4326'; # WGS84 lat lon
-dx = 0.5;
-dy = 0.5;
+dx = 0.75;
+dy = 0.75;
 
 # Make grid and visualize.
 proj = ee.Projection(projection).scale(dx, dy)
@@ -73,7 +78,8 @@ for i in range(gridSize):
     gridCellBuffer = gridCell.buffer(distance=400)
     
     defol_gridCell = defol_coll.filterBounds(gridCellBuffer).mosaic().clip(gridCellBuffer)
-    class_gridCell = defol_gridCell.lte(-0.045)
+    class_gridCell = (defol_gridCell.lte(-0.040)
+                                    .updateMask(qa_mask))
 
     ################################################
     # Remove pixels that are part of small patches
@@ -94,7 +100,7 @@ for i in range(gridSize):
         imageName = f'{assetID}_tile_{i}'
         task = ee.batch.Export.image.toAsset(
             image            = groups_denoised,
-            description      = description,
+            description      = f'{description}_tile_{i}',
             assetId          = imageName,
             region           = gridCell, 
             scale            = 10,
