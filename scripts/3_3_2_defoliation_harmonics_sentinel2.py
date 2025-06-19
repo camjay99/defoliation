@@ -15,11 +15,8 @@ parser.add_argument('--submit', '-s', action='store_true')
 # The project to submit the code in. You may be prompted to to authenticate.
 parser.add_argument('--project', '-p', action='store', default=None, required=True)
 
-# The first year to look for defoliation signals in.
-parser.add_argument('--start', '-S', action='store', default=2019)
-
-# The last year to look for defoliation signals in (inclusive).
-parser.add_argument('--end', '-E', action='store', default=2023)
+# The year to look for defoliation signals in.
+parser.add_argument('--year', '-S', action='store', type=int, default=2019)
 
 # The geomtry to calculate defoliation within. A list of valid geometries are available in scripts/geometries.py
 parser.add_argument('--geometry', '-g', action='store', default='Mt_Pleasant', choices=geometries.site_names)
@@ -28,7 +25,10 @@ parser.add_argument('--geometry', '-g', action='store', default='Mt_Pleasant', c
 parser.add_argument('--state', '-t', action='store', default=None)
 
 # The geomtry to calculate defoliation within. A list of valid geometries are available in scripts/geometries.py
-parser.add_argument('--crs', '-c', action='store', default='epsg:4326')
+parser.add_argument('--crs', '-c', action='store', default='epsg:5070')
+
+# The period to calculate the deviation over
+parser.add_argument('--period', '-P', action='store', default='all_year', choices=['all_year', 'summer', 'growing_season'])
 
 # Parse arguments provided to script
 args = parser.parse_args()
@@ -51,27 +51,26 @@ except:
 ##################################################################
 
 if args.state == None:
-    description = f'Sentinel2_unscaled_{args.geometry}_Trends'
-    assetID = f'projects/{args.project}/assets/{args.geometry}_Trends/Sentinel2_unscaled'
-    
-    phenology = ee.Image(f'projects/{args.project}/assets/{args.geometry}_Phenology_Maps/Sentinel2')
-    
+    description = f'Sentinel2_harmonic_{args.geometry}_Defoliation'
+    assetID = f'projects/{args.project}/assets/{args.geometry}_Defoliation/Sentinel2_harmonic_{args.year}_{args.period}'
+    models = (ee.ImageCollection(f'projects/{args.project}/assets/{args.geometry}_Trends')
+              .filter(ee.Filter.eq('method', 'harmonic'))
+              .mosaic())
     geometry = geometries.get_geometry(args.geometry)
 else:
-    description = f'Sentinel2_unscaled_{args.state.replace(" ", "_")}_Trends'
-    assetID=f'projects/{args.project}/assets/seasonal_trend_{args.state.replace(" ", "_")}/seasonal_trend'
-    
-    pheno_coll = ee.ImageCollection(f'projects/{args.project}/assets/average_phenology_{args.state.replace(" ", "_")}')
-
+    description = f'Sentinel2_harmonic_{args.state.replace(" ", "_")}_Defoliation'
+    assetID=f'projects/{args.project}/assets/defoliation_score_{args.state.replace(" ", "_")}/defoliation_score_harmonic_{args.year}_{args.period}'
+    model_coll = (ee.ImageCollection(f'projects/{args.project}/assets/seasonal_trend_{args.state.replace(" ", "_")}')
+                  .filter(ee.Filter.eq('method', 'harmonic')))
     geometry = geometries.get_state(args.state)
 
-start_date = ee.Date.fromYMD(args.start, 1, 1)
-end_date = ee.Date.fromYMD(args.end+1, 1, 1)
+start_date = ee.Date.fromYMD(args.year, 1, 1)
+end_date = ee.Date.fromYMD(args.year+1, 1, 1)
 
 #Specify grid size in projection, x and y units (based on projection).
 projection = 'EPSG:4326'; # WGS84 lat lon
-dx = 0.75;
-dy = 0.75;
+dx = 1;
+dy = 1;
 
 # Make grid and visualize.
 proj = ee.Projection(projection).scale(dx, dy)
@@ -98,13 +97,11 @@ for i in range(gridSize):
     # The threshold for masking; values between 0.50 and 0.65 generally work well.
     # Higher values will remove thin clouds, haze & cirrus shadows.
     CLEAR_THRESHOLD = 0.65
-
-    # Load NLCD 2019 landcover map
-    nlcd_landcover = ee.ImageCollection('USGS/NLCD_RELEASES/2019_REL/NLCD') \
-        .filter(ee.Filter.eq('system:index', '2019')).first().select('landcover')
-
+    
+    # Get phenology and models for relevant cell
     if args.state != None:
         phenology = pheno_coll.filterBounds(gridCell).mosaic();
+        models = model_coll.filterBounds(gridCell).mosaic();
 
     def preprocess(image):
         # New Bands
@@ -115,20 +112,16 @@ for i in range(gridSize):
                 'RED': image_s.select('B4'),
                 'BLUE': image_s.select('B2')
             }).rename('EVI')
-        doy = image.date().getRelative('day', 'year').add(1)
-        doy_band = ee.Image.constant(doy).uint16().rename('doy')
+
+        days = image.date().difference(start_date, 'days')
+        days_band = ee.Image(days).toFloat().rename('days')
 
         # Masks
-        forest_mask = nlcd_landcover.gte(41).And(nlcd_landcover.lte(71))
         EVI_mask = EVI.lte(1).And(EVI.gte(0))
-        pheno_mask = doy_band.gte(phenology.select('SoS')).And(doy_band.lte(phenology.select('EoS')))
         cloud_mask = image.select(QA_BAND).gte(CLEAR_THRESHOLD)
 
-
-        return (image.addBands(ee.Image([EVI, doy_band]))
-                     #.updateMask(forest_mask)
+        return (image.addBands(ee.Image([EVI, days_band]))
                      .updateMask(EVI_mask)
-                     .updateMask(pheno_mask)
                      .updateMask(cloud_mask)
                      .copyProperties(image, ['system:time_start']))
 
@@ -139,30 +132,55 @@ for i in range(gridSize):
             .linkCollection(csPlus, [QA_BAND])
             .map(preprocess))
 
-    # Calculate mean and std deviation of the rescaled EVI across all years
-    mean = s2.select('EVI').mean()
-    std = s2.select('EVI').reduce(ee.Reducer.stdDev())
-    # Mask any pixels with EVI_scaled below 1 std of the mean (noise that may interfere with model fitting process)
-    s2_scaled = s2.map(lambda image: image.updateMask(image.select('EVI').gte(mean.subtract(std))))
+    ######################################
+    # Estimate defoliation in given window
+    ######################################
 
-    #################################
-    # Theil-Sen model fitting
-    #################################
+    # Calculate anomaly
+    def calc_anom(image):
+        predict = ee.Image().expression(
+          'constant + a*doy + a_1*sin(2*pi/365.25*doy) + b_1*cos(2*pi/365.25*doy) + a_3*sin(3*2*pi/365.25*doy) + b_3*cos(3*2*pi/365.25*doy)',
+          {'constant': models.select('constant_EVI'),
+           'a': models.select('doy_EVI'),
+           'a_1': models.select('sin_12_EVI'),
+           'b_1': models.select('cos_12_EVI'),
+           'a_3': models.select('sin_4_EVI'),
+           'b_3': models.select('cos_4_EVI'),
+           'doy': image.select('days'),
+           'pi': ee.Image(3.14159265359)
+          })
 
-    ss = s2.select(['doy', 'EVI']).reduce(ee.Reducer.sensSlope())
+        anom = image.select('EVI').subtract(predict)
+
+        return image.addBands(anom.rename('EVI_anom'))
+
+    def calc_statistics(images): 
+        # TO ADD: control on this
+        ## In the original paper, Valerie et al used the whole year of anomalies. I will include that as well as only the focus period
+        images = images.map(calc_anom)
+        if args.period == 'summer':
+            mean_intensity = images.select("EVI_anom").filter(ee.Filter.dayOfYear(161, 208)).mean().rename('mean_intensity').set('period', 'summer')
+        elif args.period == 'all_year':
+            mean_intensity = images.select("EVI_anom").mean().rename('mean_intensity').set('period', 'all_year')
+        else:
+            mean_intensity = images.select("EVI_anom").filter(ee.Filter.dayOfYear(121, 273)).mean().rename('mean_intensity').set('period', 'growing_season')
+
+        return mean_intensity.set('method', 'harmonic').set('year', args.year)
 
     #################################
     # Submit batch job
     #################################
 
     if args.submit:
+        defol = calc_statistics(s2.filterDate(start_date, end_date))
+        
         if gridSize > 1:
             imageName = f'{assetID}_tile_{i}'
         else:
             imageName = assetID
-        
+
         task = ee.batch.Export.image.toAsset(
-            image            = ss,
+            image            = defol,
             description      = description,
             assetId          = imageName,
             region           = gridCell, 

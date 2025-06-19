@@ -1,5 +1,37 @@
 ##############################################################
-# Imports Packages
+# Parse arguments
+##############################################################
+
+import argparse
+import geometries
+import time
+
+parser = argparse.ArgumentParser(
+    description='Options for calculating seasonal trends')
+
+# The script will ONLY submit the run when -s or --submit is included.
+parser.add_argument('--submit', '-s', action='store_true')
+
+# The project to submit the code in. You may be prompted to to authenticate.
+parser.add_argument('--project', '-p', action='store', default=None, required=True)
+
+# The year to create a qa mask for.
+parser.add_argument('--year', '-S', action='store', type=int, default=2019)
+
+# The geomtry to calculate defoliation within. A list of valid geometries are available in scripts/geometries.py
+parser.add_argument('--geometry', '-g', action='store', default='Mt_Pleasant', choices=geometries.site_names)
+
+# State to calculate defoliation over. If specified, geometry is ignored
+parser.add_argument('--state', '-t', action='store', default=None)
+
+# The geomtry to calculate defoliation within. A list of valid geometries are available in scripts/geometries.py
+parser.add_argument('--crs', '-c', action='store', default='epsg:5070')
+
+# Parse arguments provided to script
+args = parser.parse_args()
+
+##############################################################
+# Initialize Google Earth Engine API
 ##############################################################
 
 import ee       # Google Earth Engine API
@@ -11,18 +43,10 @@ except:
     ee.Authenticate()
     ee.Initialize(project='ee-cjc378')
 
-    
-##################################################################
-# Specify analysis region
-##################################################################
-
-# New York boundaries, as specified by FAO Global Administrative Unit Layers
-region = ee.FeatureCollection('FAO/GAUL/2015/level1').filter(ee.Filter.eq('ADM1_NAME', 'New York'))
-
-
 ##################################################################
 # Helper functions
 ##################################################################
+
 def preprocess(image):
     # New Bands
     image_s = image.divide(10000)
@@ -45,36 +69,40 @@ def preprocess(image):
                  .set('doy', doy)
                  .copyProperties(image, ['system:time_start']))
 
-def combine_masks(current_element, previous_result):
-    previous_result = ee.Image(previous_result)
-    return previous_result.leftShift(1).add(current_element)
-
-
 ##################################################################
-# Create Observation Mask
+# Specify base names and load previous results for small site
 ##################################################################
+
+if args.state == None:
+    description = f'qa_mask_{args.geometry}'
+    assetID = f'projects/{args.project}/assets/qa_mask_{args.geometry}/qa_mask_{args.year}'
+    geometry = geometries.get_geometry(args.geometry)
+else:
+    description = f'qa_mask_{args.state.replace(" ", "_")}'
+    assetID=f'projects/{args.project}/assets/qa_mask_{args.state.replace(" ", "_")}/qa_mask_{args.year}'
+    geometry = geometries.get_state(args.state)
 
 #Specify grid size in projection, x and y units (based on projection).
 projection = 'EPSG:4326'; # WGS84 lat lon
-dx = 1.5;
-dy = 1.5;
+dx = 0.75;
+dy = 0.75;
 
 # Make grid and visualize.
 proj = ee.Projection(projection).scale(dx, dy)
-grid = region.geometry().coveringGrid(proj)
+grid = geometry.coveringGrid(proj)
 
 gridSize = grid.size().getInfo()
 gridList = grid.toList(gridSize)
 
 for i in range(gridSize):
-    # Initialize gri cell region
+  
     gridCell = ee.Feature(gridList.get(i)).geometry()
-    
+
     # Cloud mask parameters
     csPlus = ee.ImageCollection('GOOGLE/CLOUD_SCORE_PLUS/V1/S2_HARMONIZED')
     QA_BAND = 'cs_cdf'
     CLEAR_THRESHOLD = 0.65
-    
+
     # Create yearly observation mask
     def yearly_obs_mask(year, threshold):
         year = ee.Date.fromYMD(year, 1, 1)
@@ -100,24 +128,21 @@ for i in range(gridSize):
             .unmask(0))
         
         return obs_counts
-    
-    years = ee.List([2023, 2022, 2021, 2020, 2019])
-    strong_obs_masks = years.map(lambda year: yearly_obs_mask(year, 3))
-    combined_strong_obs_mask = ee.Image(strong_obs_masks.iterate(combine_masks, ee.Image(0)))
 
-    weak_obs_masks = years.map(lambda year: yearly_obs_mask(year, 2))
-    combined_weak_obs_mask = ee.Image(weak_obs_masks.iterate(combine_masks, ee.Image(0)))
-    
+    strong_obs_mask = yearly_obs_mask(args.year, 3)
+
+    weak_obs_mask = yearly_obs_mask(args.year, 2)
+
     # Preseason max across all years
     ## All years images
     s2_all_years = (ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
             .filterBounds(gridCell)
-            .filterDate('2019-01-01', '2024-01-01')
+            .filterDate('2019-01-01', '2025-01-01')
             .linkCollection(csPlus, [QA_BAND])
             .map(preprocess));
-    
-    preseason_max_all_years = s2_all_years.filter(ee.Filter.dayOfYear(140, 160)).select('EVI').reduce(ee.Reducer.percentile([95]))
-    
+
+    preseason_max_all_years = s2_all_years.filter(ee.Filter.dayOfYear(130, 170)).select('EVI').reduce(ee.Reducer.percentile([95]))
+
     ## Create yearly preseason mask
     def yearly_preseason_mask(year):
         year = ee.Date.fromYMD(year, 1, 1)
@@ -130,53 +155,38 @@ for i in range(gridSize):
 
         # Ensure we have large gap and observtions to base this on.
         return s2_pre_max_gap.Or(preseason_max_count).toUint16()
-    
-    preseason_masks = years.map(yearly_preseason_mask)
-    combined_preseason_mask = ee.Image(preseason_masks.iterate(combine_masks, ee.Image(0)))
 
-    # Currently not doing post-season masking, instead use space for two levels of obs masks.
-    # # Postseason max across all years
-    # postseason_max_all_years = s2_all_years.filter(ee.Filter.dayOfYear(220, 250)).select('EVI').reduce(ee.Reducer.percentile([95]))
-    
-    # ## Create yearly postseason mask
-    # def yearly_postseason_mask(year):
-    #     year = ee.Date.fromYMD(year, 1, 1)
-    #     # Target Year Images
-    #     s2 = (ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
-    #             .filterBounds(gridCell)
-    #             .filterDate(year, year.advance(1, 'year'))
-    #             .linkCollection(csPlus, [QA_BAND])
-    #             .map(preprocess))
-        
-    #     postseason_max_target = s2.filter(ee.Filter.dayOfYear(220, 250)).select('EVI').reduce(ee.Reducer.percentile([95]))
-    #     s2_post_max_gap = postseason_max_target.subtract(postseason_max_all_years)
-    #     return s2_post_max_gap.gte(-0.15).toUint16().unmask(0)
-    
-    # postseason_masks = years.map(yearly_postseason_mask)
-    # combined_postseason_mask = ee.Image(postseason_masks.iterate(combine_masks, ee.Image(0)))
-    
+    preseason_mask = yearly_preseason_mask(args.year)
+
     # Create forest cover mask
     ## Load NLCD 2019 landcover map
     nlcd_landcover = ee.ImageCollection('USGS/NLCD_RELEASES/2019_REL/NLCD') \
         .filter(ee.Filter.eq('system:index', '2019')).first().select('landcover')
     forest_mask = nlcd_landcover.gte(41).And(nlcd_landcover.lte(43)).toUint16()
-    
-    
-    # Combine masks into single layer
-    qa_mask = (forest_mask.leftShift(15)
-        .add(combined_strong_obs_mask.leftShift(10))
-        .add(combined_preseason_mask.leftShift(5))
-        .add(combined_weak_obs_mask))
+
+    # Combine masks into single image
+    qa_mask = ee.Image([forest_mask.rename('forest'),
+                        preseason_mask.rename('preseason'),
+                        strong_obs_mask.rename('count_3'),
+                        weak_obs_mask.rename('count_2')])
     
     # Create Task
-    task = ee.batch.Export.image.toAsset(
-        image            = qa_mask,
-        description      = f'qa_mask_{i}',
-        assetId          = f'projects/ee-cjc378/assets/qa_masks_New_York/qa_mask_{i}',
-        region           = gridCell, 
-        scale            = 10,
-        crs              = "EPSG:4326",
-        pyramidingPolicy = {'.default': 'mean'},
-        maxPixels        = 1e10
-    )
-    task.start()
+    if args.submit:
+        if gridSize > 1:
+            imageName = f'{assetID}_tile_{i}'
+            description = f'{description}_tile_{i}'
+        else:
+            imageName = assetID
+            description = description
+            
+        task = ee.batch.Export.image.toAsset(
+            image            = qa_mask,
+            description      = description,
+            assetId          = imageName,
+            region           = gridCell,
+            scale            = 10,
+            crs              = args.crs,
+            pyramidingPolicy = {'.default': 'mean'},
+            maxPixels        = 1e10
+        )
+        task.start()

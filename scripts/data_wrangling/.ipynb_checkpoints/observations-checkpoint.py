@@ -76,7 +76,7 @@ for i in range(gridSize):
     CLEAR_THRESHOLD = 0.65
     
     # Create yearly observation mask
-    def yearly_obs_mask(year):
+    def yearly_obs_mask(year, threshold):
         year = ee.Date.fromYMD(year, 1, 1)
         # Collect observations
         obs = (ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
@@ -95,15 +95,18 @@ for i in range(gridSize):
              
         obs_counts = (ee.ImageCollection.fromImages(mosaicList)
             .sum()
-            .gte(2)
+            .gte(threshold)
             .toUint16()
             .unmask(0))
         
         return obs_counts
     
     years = ee.List([2023, 2022, 2021, 2020, 2019])
-    obs_masks = years.map(yearly_obs_mask)
-    combined_obs_mask = ee.Image(obs_masks.iterate(combine_masks, ee.Image(0)))
+    strong_obs_masks = years.map(lambda year: yearly_obs_mask(year, 3))
+    combined_strong_obs_mask = ee.Image(strong_obs_masks.iterate(combine_masks, ee.Image(0)))
+
+    weak_obs_masks = years.map(lambda year: yearly_obs_mask(year, 2))
+    combined_weak_obs_mask = ee.Image(weak_obs_masks.iterate(combine_masks, ee.Image(0)))
     
     # Preseason max across all years
     ## All years images
@@ -119,38 +122,38 @@ for i in range(gridSize):
     def yearly_preseason_mask(year):
         year = ee.Date.fromYMD(year, 1, 1)
         # Target Year Images
-        s2 = (ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
-                .filterBounds(gridCell)
-                .filterDate(year, year.advance(1, 'year'))
-                .linkCollection(csPlus, [QA_BAND])
-                .map(preprocess))
+        s2 = s2_all_years.filterDate(year, year.advance(1, 'year'))
         
-        preseason_max_target = s2.filter(ee.Filter.dayOfYear(140, 160)).select('EVI').reduce(ee.Reducer.percentile([95]))
-        s2_pre_max_gap = preseason_max_target.subtract(preseason_max_all_years)
-        return s2_pre_max_gap.gte(-0.3).toUint16().unmask(0)
+        preseason_max_target = s2.filter(ee.Filter.dayOfYear(130, 170)).select('EVI').reduce(ee.Reducer.percentile([95]))
+        preseason_max_count = s2.filter(ee.Filter.dayOfYear(130, 170)).select('EVI').reduce(ee.Reducer.count()).eq(0).unmask(0)
+        s2_pre_max_gap = preseason_max_target.subtract(preseason_max_all_years).gte(-0.3).unmask(0)
+
+        # Ensure we have large gap and observtions to base this on.
+        return s2_pre_max_gap.Or(preseason_max_count).toUint16()
     
     preseason_masks = years.map(yearly_preseason_mask)
     combined_preseason_mask = ee.Image(preseason_masks.iterate(combine_masks, ee.Image(0)))
+
+    # Currently not doing post-season masking, instead use space for two levels of obs masks.
+    # # Postseason max across all years
+    # postseason_max_all_years = s2_all_years.filter(ee.Filter.dayOfYear(220, 250)).select('EVI').reduce(ee.Reducer.percentile([95]))
     
-    # Postseason max across all years
-    postseason_max_all_years = s2_all_years.filter(ee.Filter.dayOfYear(220, 250)).select('EVI').reduce(ee.Reducer.percentile([95]))
-    
-    ## Create yearly postseason mask
-    def yearly_postseason_mask(year):
-        year = ee.Date.fromYMD(year, 1, 1)
-        # Target Year Images
-        s2 = (ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
-                .filterBounds(gridCell)
-                .filterDate(year, year.advance(1, 'year'))
-                .linkCollection(csPlus, [QA_BAND])
-                .map(preprocess))
+    # ## Create yearly postseason mask
+    # def yearly_postseason_mask(year):
+    #     year = ee.Date.fromYMD(year, 1, 1)
+    #     # Target Year Images
+    #     s2 = (ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+    #             .filterBounds(gridCell)
+    #             .filterDate(year, year.advance(1, 'year'))
+    #             .linkCollection(csPlus, [QA_BAND])
+    #             .map(preprocess))
         
-        postseason_max_target = s2.filter(ee.Filter.dayOfYear(220, 250)).select('EVI').reduce(ee.Reducer.percentile([95]))
-        s2_post_max_gap = postseason_max_target.subtract(postseason_max_all_years)
-        return s2_post_max_gap.gte(-0.15).toUint16().unmask(0)
+    #     postseason_max_target = s2.filter(ee.Filter.dayOfYear(220, 250)).select('EVI').reduce(ee.Reducer.percentile([95]))
+    #     s2_post_max_gap = postseason_max_target.subtract(postseason_max_all_years)
+    #     return s2_post_max_gap.gte(-0.15).toUint16().unmask(0)
     
-    postseason_masks = years.map(yearly_postseason_mask)
-    combined_postseason_mask = ee.Image(postseason_masks.iterate(combine_masks, ee.Image(0)))
+    # postseason_masks = years.map(yearly_postseason_mask)
+    # combined_postseason_mask = ee.Image(postseason_masks.iterate(combine_masks, ee.Image(0)))
     
     # Create forest cover mask
     ## Load NLCD 2019 landcover map
@@ -161,9 +164,9 @@ for i in range(gridSize):
     
     # Combine masks into single layer
     qa_mask = (forest_mask.leftShift(15)
-        .add(combined_obs_mask.leftShift(10))
+        .add(combined_strong_obs_mask.leftShift(10))
         .add(combined_preseason_mask.leftShift(5))
-        .add(combined_postseason_mask))
+        .add(combined_weak_obs_mask))
     
     # Create Task
     task = ee.batch.Export.image.toAsset(

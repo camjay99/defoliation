@@ -72,10 +72,6 @@ QA_BAND = 'cs_cdf'
 # Higher values will remove thin clouds, haze & cirrus shadows.
 CLEAR_THRESHOLD = 0.65
 
-# Load NLCD 2019 landcover map
-nlcd_landcover = ee.ImageCollection('USGS/NLCD_RELEASES/2019_REL/NLCD') \
-    .filter(ee.Filter.eq('system:index', '2019')).first().select('landcover')
-
 def preprocess(image):
     # New Bands
     image_s = image.divide(10000)
@@ -90,13 +86,11 @@ def preprocess(image):
     doy_band = ee.Image.constant(doy).uint16().rename('doy')
     
     # Masks
-    forest_mask = nlcd_landcover.gte(41).And(nlcd_landcover.lte(71))
     EVI_mask = EVI.lte(1).And(EVI.gte(0))
     pheno_mask = doy_band.gte(phenology.select('SoS')).And(doy_band.lte(phenology.select('EoS')))
     cloud_mask = image.select(QA_BAND).gte(CLEAR_THRESHOLD)
     
     return (image.addBands(ee.Image([EVI, doy_band]))
-                 #.updateMask(forest_mask)
                  .updateMask(EVI_mask)
                  .updateMask(pheno_mask)
                  .updateMask(cloud_mask)

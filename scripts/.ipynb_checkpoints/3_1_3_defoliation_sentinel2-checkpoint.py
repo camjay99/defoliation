@@ -4,6 +4,7 @@
 
 import argparse
 import geometries
+import time
 
 parser = argparse.ArgumentParser(
     description='Options for calculating seasonal trends')
@@ -15,7 +16,7 @@ parser.add_argument('--submit', '-s', action='store_true')
 parser.add_argument('--project', '-p', action='store', default=None, required=True)
 
 # The year to look for defoliation signals in.
-parser.add_argument('--year', '-S', action='store', default=2019)
+parser.add_argument('--year', '-S', action='store', type=int, default=2019)
 
 # The geomtry to calculate defoliation within. A list of valid geometries are available in scripts/geometries.py
 parser.add_argument('--geometry', '-g', action='store', default='Mt_Pleasant', choices=geometries.site_names)
@@ -24,7 +25,7 @@ parser.add_argument('--geometry', '-g', action='store', default='Mt_Pleasant', c
 parser.add_argument('--state', '-t', action='store', default=None)
 
 # The geomtry to calculate defoliation within. A list of valid geometries are available in scripts/geometries.py
-parser.add_argument('--crs', '-c', action='store', default='epsg:4326')
+parser.add_argument('--crs', '-c', action='store', default='epsg:5070')
 
 # Parse arguments provided to script
 args = parser.parse_args()
@@ -92,10 +93,6 @@ for i in range(gridSize):
     # The threshold for masking; values between 0.50 and 0.65 generally work well.
     # Higher values will remove thin clouds, haze & cirrus shadows.
     CLEAR_THRESHOLD = 0.65
-
-    # Load NLCD 2019 landcover map
-    nlcd_landcover = ee.ImageCollection('USGS/NLCD_RELEASES/2019_REL/NLCD') \
-        .filter(ee.Filter.eq('system:index', '2019')).first().select('landcover')
     
     # Get phenology and models for relevant cell
     if args.state != None:
@@ -116,13 +113,11 @@ for i in range(gridSize):
         doy_band = ee.Image.constant(doy).uint16().rename('doy')
 
         # Masks
-        forest_mask = nlcd_landcover.gte(41).And(nlcd_landcover.lte(71))
         EVI_mask = EVI.lte(1).And(EVI.gte(0))
         pheno_mask = doy_band.gte(phenology.select('SoS')).And(doy_band.lte(phenology.select('EoS')))
         cloud_mask = image.select(QA_BAND).gte(CLEAR_THRESHOLD)
 
         return (image.addBands(ee.Image([EVI, doy_band]))
-                     #.updateMask(forest_mask)
                      .updateMask(EVI_mask)
                      .updateMask(pheno_mask)
                      .updateMask(cloud_mask)
@@ -160,7 +155,7 @@ for i in range(gridSize):
     #################################
 
     if args.submit:
-        defol = calc_statistics(s2.filterDate(START_DATE, END_DATE))
+        defol = calc_statistics(s2.filterDate(start_date, end_date))
         
         if gridSize > 1:
             imageName = f'{assetID}_tile_{i}'

@@ -4,6 +4,7 @@
 
 import argparse
 import geometries
+import time
 
 parser = argparse.ArgumentParser(
     description='Options for calculating seasonal trends')
@@ -166,7 +167,7 @@ for i in range(gridSize):
             assetId          = imageName,
             region           = gridCell, 
             scale            = 10,
-            crs              = args.crs
+            crs              = args.crs,
             pyramidingPolicy = {'.default': 'mean'},
             maxPixels        = 1e10
         )

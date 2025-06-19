@@ -16,10 +16,10 @@ parser.add_argument('--submit', '-s', action='store_true')
 parser.add_argument('--project', '-p', action='store', default=None, required=True)
 
 # The first year to look for defoliation signals in.
-parser.add_argument('--start', '-S', action='store', default=2019)
+parser.add_argument('--start', '-S', action='store', type=int, default=2019)
 
 # The last year to look for defoliation signals in (inclusive).
-parser.add_argument('--end', '-E', action='store', default=2023)
+parser.add_argument('--end', '-E', action='store', type=int, default=2023)
 
 # The geomtry to calculate defoliation within. A list of valid geometries are available in scripts/geometries.py
 parser.add_argument('--geometry', '-g', action='store', default='Mt_Pleasant', choices=geometries.site_names)
@@ -28,7 +28,7 @@ parser.add_argument('--geometry', '-g', action='store', default='Mt_Pleasant', c
 parser.add_argument('--state', '-t', action='store', default=None)
 
 # The geomtry to calculate defoliation within. A list of valid geometries are available in scripts/geometries.py
-parser.add_argument('--crs', '-c', action='store', default='epsg:4326')
+parser.add_argument('--crs', '-c', action='store', default='epsg:5070')
 
 # Parse arguments provided to script
 args = parser.parse_args()
@@ -51,18 +51,12 @@ except:
 ##################################################################
 
 if args.state == None:
-    description = f'Sentinel2_unscaled_{args.geometry}_Trends'
-    assetID = f'projects/{args.project}/assets/{args.geometry}_Trends/Sentinel2_unscaled'
-    
-    phenology = ee.Image(f'projects/{args.project}/assets/{args.geometry}_Phenology_Maps/Sentinel2')
-    
+    description = f'Sentinel2_harmonic_{args.geometry}_Trends'
+    assetID = f'projects/{args.project}/assets/{args.geometry}_Trends/Sentinel2_harmonic'
     geometry = geometries.get_geometry(args.geometry)
 else:
-    description = f'Sentinel2_unscaled_{args.state.replace(" ", "_")}_Trends'
-    assetID=f'projects/{args.project}/assets/seasonal_trend_{args.state.replace(" ", "_")}/seasonal_trend'
-    
-    pheno_coll = ee.ImageCollection(f'projects/{args.project}/assets/average_phenology_{args.state.replace(" ", "_")}')
-
+    description = f'Sentinel2_harmonic_{args.state.replace(" ", "_")}_Trends'
+    assetID=f'projects/{args.project}/assets/seasonal_trend_{args.state.replace(" ", "_")}/harmonic_trend'
     geometry = geometries.get_state(args.state)
 
 start_date = ee.Date.fromYMD(args.start, 1, 1)
@@ -99,13 +93,6 @@ for i in range(gridSize):
     # Higher values will remove thin clouds, haze & cirrus shadows.
     CLEAR_THRESHOLD = 0.65
 
-    # Load NLCD 2019 landcover map
-    nlcd_landcover = ee.ImageCollection('USGS/NLCD_RELEASES/2019_REL/NLCD') \
-        .filter(ee.Filter.eq('system:index', '2019')).first().select('landcover')
-
-    if args.state != None:
-        phenology = pheno_coll.filterBounds(gridCell).mosaic();
-
     def preprocess(image):
         # New Bands
         image_s = image.divide(10000)
@@ -115,22 +102,28 @@ for i in range(gridSize):
                 'RED': image_s.select('B4'),
                 'BLUE': image_s.select('B2')
             }).rename('EVI')
-        doy = image.date().getRelative('day', 'year').add(1)
-        doy_band = ee.Image.constant(doy).uint16().rename('doy')
+        #doy = image.date().getRelative('day', 'year').add(1)
+        #doy_band = ee.Image.constant(doy).uint16().rename('doy')
+        
+        days = image.date().difference(start_date, 'days')
+        days_band = ee.Image(days).toFloat().rename('days')
+        
+        # Bands for model fitting
+        constant = ee.Image(1)
+        sin_12 = ee.Image(days.multiply(2*3.14159265359/365.25).sin()).toFloat().rename('sin_12')
+        cos_12 = ee.Image(days.multiply(2*3.14159265359/365.25).cos()).toFloat().rename('cos_12')
+        sin_4 = ee.Image(days.multiply(3*2*3.14159265359/365.25).sin()).toFloat().rename('sin_4')
+        cos_4 = ee.Image(days.multiply(3*2*3.14159265359/365.25).cos()).toFloat().rename('cos_4')
+
+        features = ee.Image([constant, days_band, sin_12, cos_12, sin_4, cos_4, EVI])
 
         # Masks
-        forest_mask = nlcd_landcover.gte(41).And(nlcd_landcover.lte(71))
         EVI_mask = EVI.lte(1).And(EVI.gte(0))
-        pheno_mask = doy_band.gte(phenology.select('SoS')).And(doy_band.lte(phenology.select('EoS')))
         cloud_mask = image.select(QA_BAND).gte(CLEAR_THRESHOLD)
 
-
-        return (image.addBands(ee.Image([EVI, doy_band]))
-                     #.updateMask(forest_mask)
-                     .updateMask(EVI_mask)
-                     .updateMask(pheno_mask)
-                     .updateMask(cloud_mask)
-                     .copyProperties(image, ['system:time_start']))
+        return (features.updateMask(EVI_mask)
+                        .updateMask(cloud_mask)
+                        .copyProperties(image, ['system:time_start']))
 
     # Harmonized Sentinel-2 Level 2A collection.
     s2 = (ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
@@ -139,17 +132,15 @@ for i in range(gridSize):
             .linkCollection(csPlus, [QA_BAND])
             .map(preprocess))
 
-    # Calculate mean and std deviation of the rescaled EVI across all years
-    mean = s2.select('EVI').mean()
-    std = s2.select('EVI').reduce(ee.Reducer.stdDev())
-    # Mask any pixels with EVI_scaled below 1 std of the mean (noise that may interfere with model fitting process)
-    s2_scaled = s2.map(lambda image: image.updateMask(image.select('EVI').gte(mean.subtract(std))))
-
     #################################
-    # Theil-Sen model fitting
+    # Harmonic model fitting
     #################################
+    
+    models = (s2.reduce(ee.Reducer.linearRegression(6, 1))
+                .select(['coefficients'])
+                .arrayFlatten([['constant', 'doy', 'sin_12', 'cos_12', 'sin_4', 'cos_4'], ['EVI']]))
 
-    ss = s2.select(['doy', 'EVI']).reduce(ee.Reducer.sensSlope())
+    models = models.set('method', 'harmonic')
 
     #################################
     # Submit batch job
@@ -162,7 +153,7 @@ for i in range(gridSize):
             imageName = assetID
         
         task = ee.batch.Export.image.toAsset(
-            image            = ss,
+            image            = models,
             description      = description,
             assetId          = imageName,
             region           = gridCell, 

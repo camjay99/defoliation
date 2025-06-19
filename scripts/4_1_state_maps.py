@@ -1,4 +1,4 @@
-##############################################################
+CJShp##############################################################
 # Parse arguments
 ##############################################################
 
@@ -30,7 +30,7 @@ parser.add_argument('--scale', '-u', action='store', type=int, default=250)
 parser.add_argument('--folder', '-f', action='store', default='Defoliation')
 
 # The CRS to output the resulting layers in. Should be a projected to system to properly make sense of scale argument.
-parser.add_argument('--crs', '-c', action='store', default='epsg:2629')
+parser.add_argument('--crs', '-c', action='store', default='epsg:5070')
 
 # Parse arguments provided to script
 args = parser.parse_args()
@@ -57,7 +57,7 @@ fileName = f'{args.state.replace(" ", "_")}_mean_defoliated_area_{args.scale}m'
 
 geometry = geometries.get_state(args.state)
 denoised_coll = ee.ImageCollection(f'projects/{args.project}/assets/score_denoised_{args.state.replace(" ", "_")}')
-qa_masks = ee.ImageCollection(f'projects/{args.project}/assets/qa_masks_{args.state.replace(" ", "_")}')
+qa_coll = ee.ImageCollection(f'projects/{args.project}/assets/qa_masks_{args.state.replace(" ", "_")}')
     
 ##################################################################
 # Load defoliation data
@@ -68,9 +68,10 @@ for year in range(args.start, args.end+1):
     defol = images.mosaic()
 
     # TO DO: Create a separate masking function to facilitate scaling to other time periods/regions
-    qa_mask = qa_masks.mosaic()
-    mask = ee.Number(2**15 + 1056*2**(year - 2019)).toUint16()
-    qa_mask = qa_mask.bitwiseAnd(mask).eq(mask)
+    year_masks = {2019:1056, 2020:2144, 2021:4320, 2022:8672, 2023:17376}
+    mask_value = ee.Number(2).pow(15).add(ee.Number(year_masks[year])).toUint16()
+    qa = qa_coll.mosaic()
+    qa_mask = qa.bitwiseAnd(mask_value).eq(mask_value)
     defol = defol.updateMask(qa_mask).unmask()
     
 

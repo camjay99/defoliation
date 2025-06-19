@@ -16,10 +16,13 @@ parser.add_argument('--submit', '-s', action='store_true')
 parser.add_argument('--project', '-p', action='store', default=None, required=True)
 
 # The year to look for defoliation signals in.
-parser.add_argument('--year', '-S', action='store',  type=int, default=2019)
+parser.add_argument('--year', '-S', action='store', type=int, default=2019)
+
+# The geomtry to calculate defoliation within. A list of valid geometries are available in scripts/geometries.py
+parser.add_argument('--geometry', '-g', action='store', default='Mt_Pleasant', choices=geometries.site_names)
 
 # State to calculate defoliation over.
-parser.add_argument('--state', '-t', action='store', default='New York')
+parser.add_argument('--state', '-t', action='store', default=None)
 
 # The CRS to output the resulting layers in.
 parser.add_argument('--crs', '-c', action='store', default='epsg:5070')
@@ -44,22 +47,36 @@ except:
 # Divide Study Region
 ##############################################################
 
-description = f'Sentinel2_unscaled_{args.state.replace(" ", "_")}_Denoised'
-assetID = f'projects/{args.project}/assets/score_denoised_{args.state.replace(" ", "_")}/score_denoised_{args.year}'
-defol_coll = ee.ImageCollection(f'projects/{args.project}/assets/defoliation_score_{args.state.replace(" ", "_")}').filter(ee.Filter.eq('year', args.year))
-geometry = geometries.get_state(args.state)
+if args.state == None:
+    description = f'Sentinel2_unscaled_{args.geometry}_Denoised'
+    geometry = geometries.get_geometry(args.geometry)
+    defol_coll = (ee.ImageCollection(f'projects/{args.project}/assets/defoliation_score_New_York')
+                  .filter(ee.Filter.eq('year', args.year))
+                  .filterBounds(geometry))
+    assetID = f'projects/{args.project}/assets/score_denoised_New_York/score_denoised_Cary'
+else:
+    description = f'Sentinel2_unscaled_{args.state.replace(" ", "_")}_Denoised'
+    assetID = f'projects/{args.project}/assets/score_denoised_{args.state.replace(" ", "_")}/score_denoised_{args.year}'
+    defol_coll = ee.ImageCollection(f'projects/{args.project}/assets/defoliation_score_{args.state.replace(" ", "_")}').filter(ee.Filter.eq('year', args.year))
+    geometry = geometries.get_state(args.state)
 
 # Assemble mask
-qa_masks = ee.ImageCollection('projects/ee-cjc378/assets/qa_masks_New_York')
-year_masks = {2019:1056, 2020:2144, 2021:4320, 2022:8672, 2023:17376}
-mask_value = ee.Number(2).pow(15).add(ee.Number(year_masks[args.year])).toUint16()
-qa = qa_masks.mosaic()
-qa_mask = qa.bitwiseAnd(mask_value).eq(mask_value)
+if args.year in range(2019, 2024):
+    qa_masks = ee.ImageCollection(f'projects/ee-cjc378/assets/qa_masks_{args.state}')
+    year_masks = {2019:1056, 2020:2144, 2021:4320, 2022:8672, 2023:17376}
+    mask_value = ee.Number(2).pow(15).add(ee.Number(year_masks[args.year])).toUint16()
+    qa = qa_masks.mosaic()
+    qa_mask = qa.bitwiseAnd(mask_value).eq(mask_value)
+else:
+    qa_layer = ee.Image('projects/ee-cjc378/assets/qa_mask_Cary/qa_mask_2024')
+    qa_mask = (qa_layer.select('forest')
+               .And(qa_layer.select('preseason'))
+               .And(qa_layer.select('count_2')))
 
 #Specify grid size in projection, x and y units (based on projection).
-projection = 'EPSG:4326'; # WGS84 lat lon
-dx = 0.75;
-dy = 0.75;
+projection = 'EPSG:4326' # WGS84 lat lon
+dx = 0.75
+dy = 0.75
 
 # Make grid and visualize.
 proj = ee.Projection(projection).scale(dx, dy)
