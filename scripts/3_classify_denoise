@@ -3,6 +3,7 @@ import argparse
 import ee
 
 import geometries
+import masking
 import preprocessing
 
 
@@ -11,7 +12,7 @@ import preprocessing
 ##############################################################
 
 parser = argparse.ArgumentParser(
-    description='Options for calculating defoliation')
+    description='Options for denoising defoliation classifications')
 
 # The script will ONLY submit the run when -s or --submit is included.
 parser.add_argument('--submit', '-s', action='store_true')
@@ -39,7 +40,7 @@ parser.add_argument('--state', '-x', action='store',
                     default=None)
 
 # The CRS to output the resulting layers in.
-parser.add_argument('--crs', '-c', action='store', default='epsg:4326')
+parser.add_argument('--crs', '-c', action='store', default='epsg:5070')
 
 # The width/length of grid cells to use for computation (in lat/lon degrees)
 parser.add_argument('--width', '-w', action='store', type=int, default=0.75)
@@ -48,6 +49,13 @@ parser.add_argument('--length', '-l', action='store', type=int, default=0.75)
 # Rescale within each year to minimize interannual variability
 parser.add_argument('--rescale', '-r', action='store_true')
 
+# Select the masking function to use
+parser.add_argument('--mask', '-m', action='store_true', 
+                    default='New_York_v1', choices=masking.masks)
+
+# The threshold to use for classification.
+parser.add_argument('--threshold', '-t', action='store', type=float, default=-0.040)
+
 # Parse arguments provided to script
 args = parser.parse_args()
 
@@ -55,6 +63,8 @@ args = parser.parse_args()
 ##############################################################
 # Initialize Google Earth Engine API
 ##############################################################
+
+import ee 
 
 try:
     ee.Initialize(project=args.project)
@@ -75,13 +85,11 @@ else:
     name = args.state.replace(" ", "_")
     geometry = geometries.get_state(args.state)
 
-description_base = f'{name}_Defoliation_{args.data}'
-assetID = f'projects/{args.project}/assets/defoliation_score_{name}/defoliation_score_{args.data}'
+description_base = f'{name}_Classification_{args.data}'
+assetID = f'projects/{args.project}/assets/defoliation_class_{name}/defoliation_class_{args.data}'
 if args.rescale:
     assetID += '_rescaled'
-    description_base += '_rescaled'
-pheno_coll = ee.ImageCollection(f'projects/{args.project}/assets/average_phenology_{name}')
-model_coll = (ee.ImageCollection(f'projects/{args.project}/assets/seasonal_trend_{name}')
+defol_coll = (ee.ImageCollection(f'projects/{args.project}/assets/defoliation_score_{name}')
               .filter(ee.Filter.eq('rescaled', args.rescale))
               .filter(ee.Filter.eq('start', args.start))
               .filter(ee.Filter.eq('end', args.end))
@@ -104,75 +112,55 @@ gridSize = grid.size().getInfo()
 gridList = grid.toList(gridSize)
 
 for i in range(gridSize):
+
+    ###############################################################################
+    # Create buffer around region to ensure accurate denoising at grid cell edges
+    ###############################################################################
+    
     gridCell = ee.Feature(gridList.get(i)).geometry()
-
-    ##################################################################
-    # Prepare Data
-    ##################################################################
-
-    phenology = pheno_coll.filterBounds(gridCell).mosaic()
-    models = model_coll.filterBounds(gridCell).mosaic()
+    gridCellBuffer = gridCell.buffer(distance=400)
 
     years = list(range(args.start, args.end + 1))
 
     for year in years:
-        start_date = ee.Date.fromYMD(year, 1, 1)
-        end_date = ee.Date.fromYMD(year + 1, 1, 1)
+        ################################################
+        # Classify pixels within buffered grid cell
+        ################################################
 
-        if args.data == 'Landsat':
-            col = preprocessing.preprocess_Landsat(start_date, end_date,
-                                                   gridCell, phenology)
-        elif args.data == 'MODIS':
-            col = preprocessing.preprocess_MODIS(start_date, end_date,
-                                                 gridCell, phenology)
-        elif args.data == 'Sentinel2':
-            col = preprocessing.preprocess_Sentinel2(start_date, end_date,
-                                                     gridCell, phenology)
-
-        if args.rescale:
-            col = preprocessing.rescale_years(col, args.start, args.end)
-
+        if args.mask == 'New_York_v1':
+            qa_mask = masking.generate_qa_mask_v1(year, gridCellBuffer)
         
-        ######################################
-        # Estimate defoliation in given window
-        ######################################
-
-        # Calculate anomaly
-        def calc_anom(image):
-            slope = models.select('slope')
-            offset = models.select('offset')
-            doy = image.select('doy')
-            predict = slope.multiply(doy).add(offset)
-            anom = image.select('EVI').subtract(predict)
-
-            return image.addBands(anom.rename('EVI_anom'))
-
-        def calc_statistics(images): 
-            images = images.map(calc_anom)
-            mean_intensity = images.select("EVI_anom").filter(ee.Filter.dayOfYear(161, 208)).mean().rename("mean_intensity")
-
-            return mean_intensity.set('method', 'Sentinel2_unscaled').set('year', year)
+        defol_gridCell = (defol_coll.filter(ee.Filter.eq('year', year))
+                                    .filterBounds(gridCellBuffer)
+                                    .mosaic()
+                                    .clip(gridCellBuffer))
+        class_gridCell = (defol_gridCell.lte(args.threshold)
+                                        .updateMask(qa_mask))
         
-        defol = calc_statistics(col.filterDate(start_date, end_date))
-        defol = (defol.set('method', 'Theil-Sen')
-                      .set('source', args.data)
-                      .set('rescaled', args.rescale)
-                      .set('start', args.start)
-                      .set('end', args.end))
+        ################################################
+        # Remove pixels that are part of small patches
+        ################################################
+
+        groups_gridCell = class_gridCell.connectedPixelCount(15, False)
+        too_small = groups_gridCell.lte(10)
+        
+        groups_denoised = class_gridCell.And(too_small.Not()).toUint8()
+        
+        groups_denoised = groups_denoised.set('year', args.year)
 
         #################################
         # Submit batch job
         #################################
 
         if args.submit:
-            imageName = f'{assetID}_{year}'
+            assetID = f'{assetID}_{year}'
             description = f'{description_base}_{year}'
             if gridSize > 1:
                 imageName = f'{assetID}_tile_{i}'
                 description = f'{description}_tile_{i}'
 
             task = ee.batch.Export.image.toAsset(
-                image=defol,
+                image=groups_denoised,
                 description=description,
                 assetId=imageName,
                 region=gridCell, 

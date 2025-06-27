@@ -5,6 +5,7 @@ import ee
 import geometries
 import preprocessing
 
+
 ##############################################################
 # Parse arguments
 ##############################################################
@@ -32,6 +33,10 @@ parser.add_argument('--data', '-d', action='store',
 # A list of valid geometries are available in scripts/geometries.py
 parser.add_argument('--geometry', '-g', action='store', 
                     default='Mt_Pleasant', choices=geometries.site_names)
+
+# State to calculate trends within.
+parser.add_argument('--state', '-x', action='store', 
+                    default=None)
 
 # The crs to use for the output
 parser.add_argument('--crs', '-c', action='store', default='epsg:5070')
@@ -70,11 +75,11 @@ else:
     name = args.state.replace(" ", "_")
     geometry = geometries.get_state(name)
 
-description = f'{name}_Trends_{args.data}'
+description_base = f'{name}_Trends_{args.data}'
 assetID=f'projects/{args.project}/assets/seasonal_trend_{name}/seasonal_trend_{args.data}'
 if args.rescale:
     assetID += '_rescaled'
-    description += '_rescaled'
+    description_base += '_rescaled'
 pheno_coll = ee.ImageCollection(f'projects/{args.project}/assets/average_phenology_{name}')
 
 
@@ -115,7 +120,7 @@ for i in range(gridSize):
                                                  gridCell, phenology)
 
     if args.rescale:
-        col = preprocessing.rescale_years(col, start_date, end_date)
+        col = preprocessing.rescale_years(col, args.start, args.end)
 
 
     #################################
@@ -136,8 +141,10 @@ for i in range(gridSize):
     if args.submit:
         if gridSize > 1:
             imageName = f'{assetID}_tile_{i}'
+            description = f'{description_base}_tile_{i}'
         else:
             imageName = assetID
+            description = description_base
 
         task = ee.batch.Export.image.toAsset(
             image=ss,
