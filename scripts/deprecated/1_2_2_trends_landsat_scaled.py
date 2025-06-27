@@ -161,6 +161,7 @@ ls_scaled = ee.ImageCollection(ee.FeatureCollection(years.map(rescale)).flatten(
 
 ss = ls_scaled.select(['doy', 'EVI_scaled']).reduce(ee.Reducer.sensSlope())
 
+
 #################################
 # Submit batch job
 #################################
