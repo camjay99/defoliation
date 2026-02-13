@@ -138,10 +138,6 @@ def preprocess_Sentinel2(start_date, end_date, geometry, phenology=None):
     QA_BAND = 'cs_cdf'
     CLEAR_THRESHOLD = 0.65
 
-    # Load NLCD 2019 landcover map
-    nlcd_landcover = ee.ImageCollection('USGS/NLCD_RELEASES/2019_REL/NLCD') \
-        .filter(ee.Filter.eq('system:index', '2019')).first().select('landcover')
-
     def preprocess(image):
         # New Bands
         image_s = image.divide(10000)

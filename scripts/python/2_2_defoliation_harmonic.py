@@ -1,10 +1,12 @@
+import argparse
+
+import geometries
+
+import ee 
+
 ##############################################################
 # Parse arguments
 ##############################################################
-
-import argparse
-import geometries
-import time
 
 parser = argparse.ArgumentParser(
     description='Options for calculating seasonal trends')
@@ -27,6 +29,10 @@ parser.add_argument('--state', '-t', action='store', default=None)
 # The geomtry to calculate defoliation within. A list of valid geometries are available in scripts/geometries.py
 parser.add_argument('--crs', '-c', action='store', default='epsg:5070')
 
+# The width/length of grid cells to use for computation (in lat/lon degrees)
+parser.add_argument('--width', '-w', action='store', type=float, default=0.75)
+parser.add_argument('--length', '-l', action='store', type=float, default=0.75)
+
 # The period to calculate the deviation over
 parser.add_argument('--period', '-P', action='store', default='all_year', choices=['all_year', 'summer', 'growing_season'])
 
@@ -36,8 +42,6 @@ args = parser.parse_args()
 ##############################################################
 # Initialize Google Earth Engine API
 ##############################################################
-
-import ee 
 
 try:
     ee.Initialize(project=args.project)
@@ -67,13 +71,15 @@ else:
 start_date = ee.Date.fromYMD(args.year, 1, 1)
 end_date = ee.Date.fromYMD(args.year+1, 1, 1)
 
+##################################################################
+# Split study regions into grid cells of specified size.
+##################################################################
+
 #Specify grid size in projection, x and y units (based on projection).
 projection = 'EPSG:4326'; # WGS84 lat lon
-dx = 1;
-dy = 1;
 
 # Make grid and visualize.
-proj = ee.Projection(projection).scale(dx, dy)
+proj = ee.Projection(projection).scale(args.width, args.length)
 grid = geometry.coveringGrid(proj)
 
 gridSize = grid.size().getInfo()
@@ -98,9 +104,8 @@ for i in range(gridSize):
     # Higher values will remove thin clouds, haze & cirrus shadows.
     CLEAR_THRESHOLD = 0.65
     
-    # Get phenology and models for relevant cell
+    # Get models for relevant cell
     if args.state != None:
-        phenology = pheno_coll.filterBounds(gridCell).mosaic();
         models = model_coll.filterBounds(gridCell).mosaic();
 
     def preprocess(image):
@@ -189,5 +194,4 @@ for i in range(gridSize):
             pyramidingPolicy = {'.default': 'mean'},
             maxPixels        = 1e10
         )
-        time.sleep(0.5)
         task.start()

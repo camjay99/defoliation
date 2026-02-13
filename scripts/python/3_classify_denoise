@@ -64,8 +64,6 @@ args = parser.parse_args()
 # Initialize Google Earth Engine API
 ##############################################################
 
-import ee 
-
 try:
     ee.Initialize(project=args.project)
 except:

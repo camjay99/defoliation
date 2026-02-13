@@ -1,10 +1,12 @@
+import argparse
+
+import ee 
+
+import geometries
+
 ##############################################################
 # Parse arguments
 ##############################################################
-
-import argparse
-import geometries
-import time
 
 parser = argparse.ArgumentParser(
     description='Options for calculating seasonal trends')
@@ -15,11 +17,14 @@ parser.add_argument('--submit', '-s', action='store_true')
 # The project to submit the code in. You may be prompted to to authenticate.
 parser.add_argument('--project', '-p', action='store', default=None, required=True)
 
-# The first year to look for defoliation signals in.
-parser.add_argument('--start', '-S', action='store', type=int, default=2019)
+# The year to compare to for typical conditions.
+parser.add_argument('--baseyear', '-b', action='store', type=int, default=2019)
 
-# The last year to look for defoliation signals in (inclusive).
-parser.add_argument('--end', '-E', action='store', type=int, default=2023)
+# The year to look for defoliation signals in.
+parser.add_argument('--year', '-S', action='store', type=int, default=2019)
+
+# The width of grid cells to use in degrees lat/lon
+parser.add_argument('--width', '-w', action='store', type=float, default=1)
 
 # The geomtry to calculate defoliation within. A list of valid geometries are available in scripts/geometries.py
 parser.add_argument('--geometry', '-g', action='store', default='Mt_Pleasant', choices=geometries.site_names)
@@ -30,14 +35,17 @@ parser.add_argument('--state', '-t', action='store', default=None)
 # The geomtry to calculate defoliation within. A list of valid geometries are available in scripts/geometries.py
 parser.add_argument('--crs', '-c', action='store', default='epsg:5070')
 
+# The width/length of grid cells to use for computation (in lat/lon degrees)
+parser.add_argument('--width', '-w', action='store', type=float, default=0.75)
+parser.add_argument('--length', '-l', action='store', type=float, default=0.75)
+
 # Parse arguments provided to script
 args = parser.parse_args()
+
 
 ##############################################################
 # Initialize Google Earth Engine API
 ##############################################################
-
-import ee 
 
 try:
     ee.Initialize(project=args.project)
@@ -51,24 +59,29 @@ except:
 ##################################################################
 
 if args.state == None:
-    description = f'Sentinel2_harmonic_{args.geometry}_Trends'
-    assetID = f'projects/{args.project}/assets/{args.geometry}_Trends/Sentinel2_harmonic'
+    description = f'Sentinel2_means_{args.geometry}_Defoliation'
+    assetID = f'projects/{args.project}/assets/{args.geometry}_Defoliation/Sentinel2_means_{args.year}'
     geometry = geometries.get_geometry(args.geometry)
 else:
-    description = f'Sentinel2_harmonic_{args.state.replace(" ", "_")}_Trends'
-    assetID=f'projects/{args.project}/assets/seasonal_trend_{args.state.replace(" ", "_")}/harmonic_trend'
+    description = f'Sentinel2_means_{args.state.replace(" ", "_")}_Defoliation'
+    assetID=f'projects/{args.project}/assets/defoliation_score_{args.state.replace(" ", "_")}/defoliation_score_means_{args.year}'
     geometry = geometries.get_state(args.state)
 
-start_date = ee.Date.fromYMD(args.start, 1, 1)
-end_date = ee.Date.fromYMD(args.end+1, 1, 1)
+base_start_date = ee.Date.fromYMD(args.baseyear, 1, 1)
+base_end_date = ee.Date.fromYMD(args.baseyear+1, 1, 1)
+
+start_date = ee.Date.fromYMD(args.year, 1, 1)
+end_date = ee.Date.fromYMD(args.year+1, 1, 1)
+
+##################################################################
+# Split study regions into grid cells of specified size.
+##################################################################
 
 #Specify grid size in projection, x and y units (based on projection).
 projection = 'EPSG:4326'; # WGS84 lat lon
-dx = 0.75;
-dy = 0.75;
 
 # Make grid and visualize.
-proj = ee.Projection(projection).scale(dx, dy)
+proj = ee.Projection(projection).scale(args.width, args.length)
 grid = geometry.coveringGrid(proj)
 
 gridSize = grid.size().getInfo()
@@ -102,45 +115,46 @@ for i in range(gridSize):
                 'RED': image_s.select('B4'),
                 'BLUE': image_s.select('B2')
             }).rename('EVI')
-        #doy = image.date().getRelative('day', 'year').add(1)
-        #doy_band = ee.Image.constant(doy).uint16().rename('doy')
-        
-        days = image.date().difference(start_date, 'days')
-        days_band = ee.Image(days).toFloat().rename('days')
-        
-        # Bands for model fitting
-        constant = ee.Image(1)
-        sin_12 = ee.Image(days.multiply(2*3.14159265359/365.25).sin()).toFloat().rename('sin_12')
-        cos_12 = ee.Image(days.multiply(2*3.14159265359/365.25).cos()).toFloat().rename('cos_12')
-        sin_4 = ee.Image(days.multiply(3*2*3.14159265359/365.25).sin()).toFloat().rename('sin_4')
-        cos_4 = ee.Image(days.multiply(3*2*3.14159265359/365.25).cos()).toFloat().rename('cos_4')
 
-        features = ee.Image([constant, days_band, sin_12, cos_12, sin_4, cos_4, EVI])
+        doy = image.date().getRelative('day', 'year')
+        doy_band = ee.Image.constant(doy).uint16().rename('doy')
 
         # Masks
         EVI_mask = EVI.lte(1).And(EVI.gte(0))
         cloud_mask = image.select(QA_BAND).gte(CLEAR_THRESHOLD)
 
-        return (features.updateMask(EVI_mask)
-                        .updateMask(cloud_mask)
-                        .copyProperties(image, ['system:time_start']))
+        return (EVI.updateMask(EVI_mask)
+                   .updateMask(cloud_mask)
+                   .copyProperties(image, ['system:time_start']))
 
     # Harmonized Sentinel-2 Level 2A collection.
-    s2 = (ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+    base_s2 = (ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+            .filterBounds(gridCell)
+            .filterDate(base_start_date, base_end_date)
+            .filter(ee.Filter.dayOfYear(161, 208))
+            .linkCollection(csPlus, [QA_BAND])
+            .map(preprocess)
+            .mean())
+    
+    # Harmonized Sentinel-2 Level 2A collection.
+    defol_s2 = (ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
             .filterBounds(gridCell)
             .filterDate(start_date, end_date)
+            .filter(ee.Filter.dayOfYear(161, 208))
             .linkCollection(csPlus, [QA_BAND])
-            .map(preprocess))
+            .map(preprocess)
+            .mean())
 
-    #################################
-    # Harmonic model fitting
-    #################################
-    
-    models = (s2.reduce(ee.Reducer.linearRegression(6, 1))
-                .select(['coefficients'])
-                .arrayFlatten([['constant', 'doy', 'sin_12', 'cos_12', 'sin_4', 'cos_4'], ['EVI']]))
+    ######################################
+    # Estimate defoliation in given window
+    ######################################
 
-    models = models.set('method', 'harmonic')
+    # Calculate anomaly
+    defol = (defol_s2.subtract(base_s2)
+             .rename("mean_intensity")
+             .set('year', args.year)
+             .set('baseyear', args.baseyear)
+             .set('method', 'means'))
 
     #################################
     # Submit batch job
@@ -151,9 +165,9 @@ for i in range(gridSize):
             imageName = f'{assetID}_tile_{i}'
         else:
             imageName = assetID
-        
+
         task = ee.batch.Export.image.toAsset(
-            image            = models,
+            image            = defol,
             description      = description,
             assetId          = imageName,
             region           = gridCell, 
@@ -162,5 +176,4 @@ for i in range(gridSize):
             pyramidingPolicy = {'.default': 'mean'},
             maxPixels        = 1e10
         )
-        time.sleep(0.5)
         task.start()
