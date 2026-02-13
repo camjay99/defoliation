@@ -40,9 +40,6 @@ for year in [2019, 2020, 2021, 2022]:
     # New York boundaries, as specified by FAO Global Administrative Unit Layers
     region = ee.FeatureCollection('FAO/GAUL/2015/level1').filter(ee.Filter.eq('ADM1_NAME', 'New York'))
 
-    # Tompkins County boundaries, as specified by FAO Global Administrative Unit Layers
-    #region = ee.FeatureCollection('FAO/GAUL/2015/level2').filter(ee.Filter.eq('ADM1_NAME', 'New York')).filter(ee.Filter.eq('ADM2_NAME', 'Tompkins'))
-
 
     ##################################################################
     # Classify by defoliation intensity
